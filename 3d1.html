@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>粒子手势交互系统 - 所有图片同时展示（最终版 - 方向修复）</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        /* 界面样式 */
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000000; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas { display: block; }
+        
+        #fullscreen-btn {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            padding: 8px 12px;
+            background-color: rgba(30, 30, 30, 0.7);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            cursor: pointer;
+            z-index: 1000;
+            transition: background-color 0.3s;
+        }
+        #fullscreen-btn:hover {
+            background-color: rgba(60, 60, 60, 0.9);
+        }
+
+        /* 隐藏摄像头视频流 */
+        #video-container {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .dg.main {
+            z-index: 1001 !important;
+            top: 50px !important;
+            border-radius: 5px;
+            right: 15px !important; 
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="video-container">
+        <video id="webcam-video" playsinline></video>
+    </div>
+    <button id="fullscreen-btn">全屏</button>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    
+    <script>
+        // =================================================================
+        //                 全局变量和参数设置
+        // =================================================================
+        let scene, camera, renderer;
+        let particles, backgroundParticles;
+        let imagePlanes = []; 
+        
+        // 🔥 图片配置 (请确保这些文件名存在于您的文件夹中)
+        const IMAGE_FILES = [
+            'mmexport1764823157249.jpg', 
+            'mmexport1759924088470.jpg', 
+            'mmexport1764822973131.jpg', 
+            'mmexport1761983154330.jpg',
+            'IMG_20251008_180842.jpg', // 示例图片 
+            // 💡 在此添加所有图片文件名
+        ];
+
+        // 🔥 随机位置和大小的参数
+        const MAX_POSITION_RANGE = 8.0; // 扩大随机平移范围，解决重叠
+        const MIN_SCALE = 0.5; 
+        const MAX_SCALE = 1.0; 
+        const BASE_IMAGE_WIDTH = 1.0; 
+
+        // 粒子和手势控制变量
+        let baseColor = new THREE.Color(0xE0C47E); 
+        let particleScale = 1.0; 
+        let targetScale = 1.0;   
+        let particlesPosition = new THREE.Vector3(0, 0, 0); 
+        let targetPosition = new THREE.Vector3(0, 0, 0);    
+        const SMOOTHING_FACTOR = 0.15; 
+        const WINDOW_SIZE = 5; 
+        let scaleHistory = [];
+        let positionXHistory = [];
+        let positionYHistory = [];
+        
+        // UI 控制参数
+        const Params = {
+            particleColor: baseColor.getHex(),
+            model: 'Saturn',
+            particleSize: 0.02,
+            targetSpread: 2.5, 
+            density: 20000 
+        };
+
+        // =================================================================
+        //                       核心功能函数定义
+        // =================================================================
+        
+        // --- 1. 粒子模型生成器 (保持不变) ---
+        const ParticleModels = {
+            Sphere: (count, spread) => {
+                const pos = [];
+                for (let i = 0; i < count; i++) {
+                    const radius = Math.cbrt(Math.random()) * spread; 
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos(Math.random() * 2 - 1);
+                    pos.push(radius * Math.sin(phi) * Math.cos(theta));
+                    pos.push(radius * Math.sin(phi) * Math.sin(theta));
+                    pos.push(radius * Math.cos(phi));
+                }
+                return pos;
+            },
+            Saturn: (count, spread) => {
+                const pos = [];
+                for (let i = 0; i < count; i++) {
+                    if (Math.random() < 0.6) {
+                        const r = (1 + Math.random() * 1.0) * spread * 0.5; 
+                        const theta = Math.random() * Math.PI * 2;
+                        const z = (Math.random() - 0.5) * 0.05 * spread; 
+                        pos.push(r * Math.cos(theta));
+                        pos.push(z); 
+                        pos.push(r * Math.sin(theta));
+                    } else { 
+                        const r = Math.cbrt(Math.random()) * spread * 0.4; 
+                        const theta = Math.random() * Math.PI * 2;
+                        const phi = Math.acos(Math.random() * 2 - 1);
+                        pos.push(r * Math.sin(phi) * Math.cos(theta));
+                        pos.push(r * Math.sin(phi) * Math.sin(theta));
+                        pos.push(r * Math.cos(phi));
+                    }
+                }
+                return pos;
+            }
+        };
+
+        // --- 2. 创建背景粒子 (保持不变) ---
+        function createBackgroundParticles() {
+            const bgGeometry = new THREE.BufferGeometry();
+            const bgPositions = [];
+            const bgCount = 500;
+            for (let i = 0; i < bgCount; i++) {
+                bgPositions.push((Math.random() - 0.5) * 100); 
+                bgPositions.push((Math.random() - 0.5) * 100);
+                bgPositions.push((Math.random() - 0.5) * 100);
+            }
+            bgGeometry.setAttribute('position', new THREE.Float32BufferAttribute(bgPositions, 3));
+            const bgMaterial = new THREE.PointsMaterial({
+                color: 0x555555,
+                size: 0.1,
+                sizeAttenuation: true
+            });
+            backgroundParticles = new THREE.Points(bgGeometry, bgMaterial);
+            scene.add(backgroundParticles);
+        }
+
+        // --- 3. 更新粒子几何体和模型 (保持不变) ---
+        function updateParticles(newPositions, isInitial = false) {
+            const particleCount = newPositions.length / 3;
+            
+            const colors = new Float32Array(particleCount * 3);
+            for (let i = 0; i < particleCount; i++) {
+                colors[i * 3 + 0] = baseColor.r;
+                colors[i * 3 + 1] = baseColor.g;
+                colors[i * 3 + 2] = baseColor.b;
+            }
+
+            if (isInitial || particles === undefined || particles.geometry.attributes.position.count !== particleCount) {
+                const particleGeometry = new THREE.BufferGeometry();
+                particleGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newPositions), 3));
+                particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                
+                const particleMaterial = new THREE.PointsMaterial({
+                    size: Params.particleSize,
+                    vertexColors: true,
+                    blending: THREE.AdditiveBlending,
+                    transparent: true,
+                    sizeAttenuation: true
+                });
+
+                if (particles) scene.remove(particles);
+                particles = new THREE.Points(particleGeometry, particleMaterial);
+                particles.rotation.x = Math.PI * 0.25; 
+                scene.add(particles);
+            } else {
+                particles.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newPositions), 3));
+                particles.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+        
+        // --- 4. 加载所有图片并创建独立的 Mesh (保持宽高比) ---
+        function loadAllImagesAndCreatePlanes(imagePaths) {
+            const textureLoader = new THREE.TextureLoader();
+            const geometry = new THREE.PlaneGeometry(1, 1); 
+
+            imagePaths.forEach((path) => {
+                textureLoader.load(path, function(texture) {
+                    
+                    const aspectRatio = texture.image.width / texture.image.height;
+                    const width = BASE_IMAGE_WIDTH;
+                    const height = BASE_IMAGE_WIDTH / aspectRatio;
+                    const randomScale = MIN_SCALE + Math.random() * (MAX_SCALE - MIN_SCALE);
+                    
+                    const material = new THREE.MeshBasicMaterial({
+                        map: texture, 
+                        transparent: true,
+                        opacity: 0.0, 
+                        blending: THREE.AdditiveBlending, 
+                        side: THREE.DoubleSide
+                    });
+                    
+                    const imagePlane = new THREE.Mesh(geometry, material);
+                    imagePlane.scale.set(width * randomScale, height * randomScale, 1);
+
+                    const randomX = (Math.random() - 0.5) * 2 * MAX_POSITION_RANGE;
+                    const randomY = (Math.random() - 0.5) * 2 * MAX_POSITION_RANGE;
+                    const randomZ = (Math.random() - 0.5) * 2 * MAX_POSITION_RANGE;
+                    imagePlane.position.set(randomX, randomY, randomZ);
+                    
+                    scene.add(imagePlane);
+                    imagePlanes.push(imagePlane);
+
+                }, undefined, function(err) {
+                    console.error('加载图片失败，请检查文件名和路径是否正确：', path, err);
+                });
+            });
+        }
+        
+        // --- 5. MediaPipe 结果处理 (手势控制核心逻辑 - X轴已修复) ---
+        function onResults(results) {
+            let rawScaleInput = 1.0;
+            let currentHandPosition = null;
+
+            const detectedHands = results.multiHandLandmarks;
+            const handCount = detectedHands ? detectedHands.length : 0;
+            const SCENE_SENSITIVITY = 8; 
+            const limit = 3.5;
+            
+            if (handCount >= 2) {
+                const hand1 = detectedHands[0];
+                const hand2 = detectedHands[1];
+                const wrist1 = hand1[0];
+                const wrist2 = hand2[1]; 
+                const handDistance = Math.sqrt(
+                    Math.pow(wrist1.x - wrist2.x, 2) + Math.pow(wrist1.y - wrist2.y, 2)
+                );
+                const minDistance = 0.1;
+                const maxDistance = 0.6;
+                const normalizedDistance = Math.min(1.0, Math.max(0.0, (handDistance - minDistance) / (maxDistance - minDistance)));
+                rawScaleInput = 0.5 + normalizedDistance * 2.0;
+                const centerX = (wrist1.x + wrist2.x) / 2;
+                const centerY = (wrist1.y + wrist2.y) / 2;
+                
+                // 🔥 修复 X 轴方向：使用 (0.5 - centerX) 反转坐标
+                currentHandPosition = new THREE.Vector3(
+                    (0.5 - centerX) * SCENE_SENSITIVITY, 
+                    (0.5 - centerY) * SCENE_SENSITIVITY, 0 
+                );
+
+            } else if (handCount === 1) {
+                const handLandmarks = detectedHands[0];
+                const thumbTip = handLandmarks[4];
+                const pinkyTip = handLandmarks[20];
+                const fingerDistance = Math.sqrt(
+                    Math.pow(thumbTip.x - pinkyTip.x, 2) + Math.pow(thumbTip.y - pinkyTip.y, 2)
+                );
+                const minClosure = 0.05; 
+                const maxOpen = 0.35;     
+                const normalizedDistance = Math.min(1.0, Math.max(0.0, (fingerDistance - minClosure) / (maxOpen - minClosure)));
+                rawScaleInput = 0.5 + normalizedDistance * 2.0; 
+                const wrist = handLandmarks[0];
+                
+                // 🔥 修复 X 轴方向：使用 (0.5 - wrist.x) 反转坐标
+                currentHandPosition = new THREE.Vector3(
+                    (0.5 - wrist.x) * SCENE_SENSITIVITY, 
+                    (0.5 - wrist.y) * SCENE_SENSITIVITY, 0 
+                );
+            } 
+            
+            if (currentHandPosition) {
+                currentHandPosition.x = Math.min(limit, Math.max(-limit, currentHandPosition.x));
+                currentHandPosition.y = Math.min(limit, Math.max(-limit, currentHandPosition.y));
+                positionXHistory.push(currentHandPosition.x);
+                positionYHistory.push(currentHandPosition.y);
+                if (positionXHistory.length > WINDOW_SIZE) { positionXHistory.shift(); positionYHistory.shift(); }
+                const smoothX = positionXHistory.reduce((a, b) => a + b, 0) / positionXHistory.length;
+                const smoothY = positionYHistory.reduce((a, b) => a + b, 0) / positionYHistory.length;
+                targetPosition.set(smoothX, smoothY, 0);
+                scaleHistory.push(rawScaleInput);
+                if (scaleHistory.length > WINDOW_SIZE) { scaleHistory.shift(); }
+                const smoothScale = scaleHistory.reduce((a, b) => a + b, 0) / scaleHistory.length;
+                targetScale = Math.min(3.0, Math.max(0.5, smoothScale)); 
+
+            } else {
+                targetScale = 1.0; 
+                targetPosition.set(0, 0, 0); 
+                scaleHistory = [];
+                positionXHistory = [];
+                positionYHistory = [];
+            }
+        }
+        
+        // --- 6. MediaPipe 初始化 (保持不变) ---
+        function setupMediaPipe() {
+            const videoElement = document.getElementById('webcam-video');
+            const hands = new Hands({
+                locateFile: (file) => { return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`; }
+            });
+
+            hands.setOptions({
+                maxNumHands: 2, modelComplexity: 1, 
+                minDetectionConfidence: 0.5, minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onResults);
+
+            const camera = new Camera(videoElement, {
+                onFrame: async () => { await hands.send({ image: videoElement }); },
+                width: 640, height: 480
+            });
+            camera.start();
+
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => { videoElement.srcObject = stream; videoElement.play(); })
+                .catch(err => { console.error("无法访问摄像头: ", err); });
+        }
+        
+        // --- 7. 动画循环 (布告板效果) ---
+        function animate(time) {
+            requestAnimationFrame(animate);
+            
+            // 粒子缩放和平移跟随手势
+            particleScale += (targetScale - particleScale) * 0.1;
+            particles.scale.set(particleScale, particleScale, particleScale);
+            particlesPosition.lerp(targetPosition, SMOOTHING_FACTOR);
+            particles.position.copy(particlesPosition);
+            particles.rotation.y += 0.003; 
+            backgroundParticles.rotation.y -= 0.0005;
+
+            // 遍历所有图片Mesh，应用显隐和面向摄像机
+            if (imagePlanes.length > 0) {
+                
+                const minScale = 1.0; 
+                const maxScale = 2.0;
+                const targetOpacity = Math.min(1.0, Math.max(0.0, (particleScale - minScale) / (maxScale - minScale)));
+                
+                imagePlanes.forEach(plane => {
+                    // 应用平滑透明度变化 (手势放大粒子团时显示图片)
+                    plane.material.opacity += (targetOpacity - plane.material.opacity) * 0.15;
+                    
+                    // 使图片始终面向摄像机 (布告板效果)
+                    plane.lookAt(camera.position);
+                });
+            }
+            
+            renderer.render(scene, camera);
+        }
+
+        // --- 8. UI 控制面板 (保持不变) ---
+        function setupControls() {
+            const gui = new dat.GUI();
+            gui.addColor(Params, 'particleColor').name('粒子颜色').onChange(value => {
+                baseColor.set(value);
+                particles.material.color.set(baseColor); 
+            });
+            gui.add(Params, 'particleSize', 0.005, 0.1).name('粒子尺寸').onChange(size => {
+                particles.material.size = size;
+            });
+            gui.add(Params, 'targetSpread', 0.5, 5.0).step(0.1).name('扩散度/大小').onFinishChange(spread => {
+                const newPos = ParticleModels.Saturn(Params.density, spread);
+                updateParticles(newPos);
+            });
+            gui.add(Params, 'density', 5000, 100000).step(1000).name('粒子密度').onFinishChange(count => {
+                const newPos = ParticleModels[Params.model](count, Params.targetSpread);
+                updateParticles(newPos);
+            });
+            gui.add(Params, 'model', Object.keys(ParticleModels)).name('粒子模型').onFinishChange(modelName => {
+                const newPos = ParticleModels[modelName](Params.density, Params.targetSpread);
+                updateParticles(newPos);
+            });
+        }
+        
+        // --- 9. 初始化 Three.js 场景 ---
+        function initThreeJS() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('container').appendChild(renderer.domElement);
+            camera.position.z = 10; 
+
+            createBackgroundParticles();
+            updateParticles(ParticleModels.Saturn(Params.density, Params.targetSpread), true); 
+            loadAllImagesAndCreatePlanes(IMAGE_FILES); 
+
+            setupControls();
+            window.addEventListener('resize', onWindowResize, false);
+            document.getElementById('fullscreen-btn').addEventListener('click', toggleFullscreen);
+
+            animate();
+        }
+
+        // --- 10. 窗口和全屏事件 (保持不变) ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
+        }
+        
+        // --- 11. 应用程序启动 (保持不变) ---
+        function initApp() {
+            initThreeJS();
+            setupMediaPipe();
+        }
+
+        // 最终启动
+        initApp();
+    </script>
+</body>
+</html>
